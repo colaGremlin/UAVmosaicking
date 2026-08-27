@@ -1,0 +1,93 @@
+import React from "react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { X } from "lucide-react";
+
+type Props = {
+  src: string | undefined; // URL of the image or undefined if using previewNode
+  previewNode?: React.ReactNode;
+  filename?: string;
+  onDelete?: () => void;
+  showDelete?: boolean;
+  showWarning?: boolean;
+  children?: React.ReactNode; // for progress bar or extras
+};
+
+export const GalleryImage: React.FC<Props> = ({
+  src,
+  previewNode,
+  filename,
+  onDelete,
+  showDelete = true,
+  showWarning = false,
+  children,
+}) => {
+  return (
+    <Card
+      className="relative p-0 flex flex-col justify-between items-center h-full gap-0 rounded-sm"
+    >
+
+      {/* Warning Badge */}
+      {showWarning && (
+        <div
+          title="No mapping data — this image cannot be used for mapping"
+          className="absolute top-2 left-2 z-10 bg-amber-400 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold leading-none"
+        >
+          !
+        </div>
+      )}
+
+      {/* Delete Button */}
+      {showDelete && onDelete && (
+        <Button
+          variant="secondary"
+          size="icon"
+          className="absolute top-2 right-3 rounded-full z-10 hover:bg-red-500 hover:text-white cursor-pointer"
+          onClick={(e) => {
+            e.stopPropagation(); // Prevents click from bubbling to Dropzone
+            onDelete?.();
+          }}
+        >
+          <X />
+        </Button>
+      )}
+
+      {/* Image */}
+      {/* <div className="w-full overflow-hidden p-1">
+        <img
+            src={src}
+            alt={filename}
+            className="w-full h-full object-contain rounded-xs"
+        /> 
+        </div> */}
+      <div className="w-full overflow-hidden p-1 ">
+        {(previewNode && src === undefined) ? (
+          <div className="flex items-center justify-center bg-muted rounded aspect-[4/3]">
+            {previewNode}
+          </div>
+        ) : src ? (
+          <img
+            src={src}
+            alt={filename}
+            className="w-full h-full object-contain rounded-xs"
+          />
+        ) : null}
+      </div>
+
+      <div className="mt-0 w-full p-2">
+        {children} {/* typically the Progress */}
+        {filename && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <p className="text-sm mt-1 w-full truncate text-center">{filename}</p>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{filename}</p>
+            </TooltipContent>
+          </Tooltip>
+        )}
+      </div>
+    </Card>
+  );
+};

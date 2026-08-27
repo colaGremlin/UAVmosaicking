@@ -1,0 +1,146 @@
+# entrypoint for celery task and in case of reprocessing defines the necessary processing steps
+from app.services.celery_app import celery_app
+import time
+import redis
+import os
+from app.schemas.report import ProcessingSettings
+from app.config import config
+import app.crud.report as crud
+import app.crud.map as map_crud
+from app.database import get_db
+from sqlalchemy.orm import Session
+from app.services.mapping.preprocessing import preprocess_report
+from app.services.mapping.fast_mapping import map_images
+from app.services.mapping.advanced_mapping import map_images_advanced
+from app.services.mapping.progress_updater import ProgressUpdater
+from app.services.mapping.odm_mapping import summon_webODM_mapping_selections, process_webODM
+from app.services.image_processing import reread_image_metadata
+import app.services.events as events_service
+import logging
+
+r = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, db=0)
+logger = logging.getLogger(__name__)
+
+@celery_app.task(name="mapping.process_report")
+def process_report(report_id: int, settings: dict = None):
+    db = next(get_db())
+    progress_updater = ProgressUpdater(report_id, r, db)
+    logger.info(f"Starting processing for report {report_id}")
+    logger.info(f"Settings of type {type(settings)}: {settings}")
+    try:
+        report = crud.get_full_report(db, report_id, r)
+        images = report.mapping_report.images
+        mapping_report_id = report.mapping_report.id
+
+        do_reread = settings.get('reread_metadata', False)
+
+        if do_reread:
+            progress_updater.scope(0.0, 20.0)
+            reread_image_metadata(images, db, progress_updater)
+            report = crud.get_full_report(db, report_id, r)
+            images = report.mapping_report.images
+
+        progress_updater.scope(20.0 if do_reread else 0.0, 100.0)
+        mapping_selections = preprocess_report(report_id, images, settings, db, progress_updater)
+
+
+        if (settings['fast_mapping'] or settings["odm_processing"]) and len(mapping_selections) > 0:
+            #delete old maps if they exist
+            old_maps = map_crud.get_maps_by_mapping_report(db, mapping_report_id)
+            for old_map in old_maps:
+                logger.info(f"Deleting old map {old_map.id} for report {report_id}")
+                if not old_map.odm and settings["fast_mapping"]:  # Only delete non-ODM maps
+                    map_crud.delete(db, old_map.id)
+                elif old_map.odm and settings["odm_processing"]:
+                    map_crud.delete(db, old_map.id)
+
+        odm_mapping_selections = []
+        if settings["odm_processing"] and len(mapping_selections) > 0:
+            odm_mapping_selections = summon_webODM_mapping_selections(mapping_selections)
+
+        progress_updater.update_progress("preprocessing", 100.0)
+        progress_updater.scope(0.0, 100.0)
+
+        if settings['fast_mapping'] and len(mapping_selections) > 0:
+            for map_index, mapping_selection in enumerate(mapping_selections):
+                    progress_updater.set_map_index(map_index, len(mapping_selections)+len(odm_mapping_selections))
+                    # time_a = time.time()
+                    # map_images(report_id, mapping_report_id, mapping_selection, settings, db, progress_updater, map_index=map_index)
+                    # time_b = time.time()
+                    map_images_advanced(report_id, mapping_report_id, mapping_selection, settings, db, progress_updater, map_index=map_index)
+                    # time_c = time.time()
+                    # logger.info(f"Finished og fast mapping task {map_index} for report {report_id} in:  {time_b - time_a:.2f}")
+                    # logger.info(f"Finished advanced mapping task {map_index} for report {report_id} in: {time_c - time_b:.2f}")
+
+        if settings['odm_processing'] and len(odm_mapping_selections) > 0:
+            webODM_project_id = crud.get_mapping_report_webodm_project_id(db, report_id)
+            for map_index, odm_mapping_selection in enumerate(odm_mapping_selections):
+                # Process each ODM mapping task
+                logger.info(f"Processing ODM mapping task {odm_mapping_selection['type']} for report {report_id}")
+                progress_updater.set_map_index(map_index + len(mapping_selections), len(odm_mapping_selections) + len(mapping_selections))
+                new_project_id = process_webODM(report_id, mapping_report_id, webODM_project_id, odm_mapping_selection, settings, db, progress_updater, map_index)
+                if new_project_id is not None:
+                    webODM_project_id = new_project_id
+
+        # ------------------------------------------------------------------
+        # Optional 3D reconstruction (COLMAP SfM). Runs in its own GPU worker
+        # *after* mapping when the user opted in. Fire-and-forget: detection /
+        # reID is a separate, later user action that simply uses the 3D output
+        # if present (and falls back to 2D otherwise), so mapping does not wait
+        # on it. Artifacts land in the shared volume at reports_data/{id}/colmap/.
+        # ------------------------------------------------------------------
+        if settings.get('run_colmap'):
+            try:
+                _dispatch_colmap(report_id, images, settings)
+            except Exception as colmap_err:  # noqa: BLE001 - reconstruction is optional
+                logger.error(f"Failed to dispatch COLMAP for report {report_id}: {colmap_err}")
+
+        progress_updater.update_progress("completed", 100.0)
+    except Exception as e:
+        logger.error(f"Error processing report {report_id}: {e}")
+        # r.set(f"report:{report_id}:progress", -1.0)  # Indicate failure
+        # crud.update_process(db, report_id, "failed", 0.0)
+        progress_updater.update_progress("failed", 0.0)
+        logger.error(f"Report {report_id} processing failed with error: {e}")
+        raise e
+
+    finally:
+        db.close()
+
+
+def _dispatch_colmap(report_id: int, images, settings: dict) -> None:
+    """Queue a COLMAP SfM reconstruction for the report's non-thermal images.
+
+    Image paths are passed as the relative ``Image.url`` (``reports_data/...``),
+    which the COLMAP worker resolves from its own CWD against the shared volume
+    — the same portable scheme the YOLO worker uses. Output goes to
+    ``reports_data/{report_id}/colmap/``.
+    """
+    image_paths = {
+        os.path.basename(img.url): img.url
+        for img in images
+        if not img.thermal and img.url
+    }
+    if len(image_paths) < 3:
+        logger.info(f"Skipping COLMAP for report {report_id}: too few images ({len(image_paths)})")
+        return
+
+    results_path = os.path.join("reports_data", str(report_id), "colmap")
+    options = {"dense": bool(settings.get('colmap_dense', False))}
+
+    task = celery_app.signature(
+        "colmap.run",
+        args=[report_id, image_paths, results_path, options],
+        queue="colmap",
+    ).apply_async()
+
+    r.set(f"colmap:{report_id}:task_id", task.id)
+    r.set(f"colmap:{report_id}:status", "queued")
+    r.set(f"colmap:{report_id}:progress", 0)
+    r.set(f"colmap:{report_id}:message", "COLMAP reconstruction queued")
+    events_service.publish_event(
+        r, report_id, events_service.EVENT_COLMAP_STATUS,
+        status="queued", progress=0, message="COLMAP reconstruction queued",
+    )
+    logger.info(f"Dispatched COLMAP task {task.id} for report {report_id} ({len(image_paths)} images, dense={options['dense']})")
+

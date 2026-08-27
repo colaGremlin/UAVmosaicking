@@ -1,0 +1,196 @@
+/**
+ * Coordinate and GPS utilities
+ * Functions for UTM distance calculations, flight trajectory extraction, and detection GPS computation
+ */
+
+import type { ImageBasic, UTMCoord, GPSCoord } from "@/types/image";
+import type { Detection } from "@/types/detection";
+import type { Map } from "@/types/map";
+
+/**
+ * Calculate Euclidean distance between two UTM coordinates
+ */
+export function utmDistance(a: UTMCoord, b: UTMCoord): number {
+    const dx = a.easting - b.easting;
+    const dy = a.northing - b.northing;
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Extract flight trajectory from images as GPS coordinates
+ * Filters out thermal duplicates (when thermal and regular images are taken at same location)
+ * Returns chronologically sorted [lat, lon] pairs
+ */
+export function extractFlightTrajectory(images: ImageBasic[]): [number, number][] {
+    // Create a copy to avoid mutating the original array
+    const sortedImages = [...images].sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    const selected: ImageBasic[] = [];
+
+    for (let i = 0; i < sortedImages.length; i++) {
+        const img = sortedImages[i];
+        if (!img.coord?.gps || img.panoramic) continue;
+
+        const prev = selected[selected.length - 1];
+
+        if (
+            prev &&
+            Math.abs(
+                new Date(img.created_at).getTime() - new Date(prev.created_at).getTime()
+            ) <= 2000 // within 2 seconds
+        ) {
+            // One thermal, one regular?
+            if (img.thermal !== prev.thermal) {
+                const utm1 = img.coord?.utm;
+                const utm2 = prev.coord?.utm;
+
+                if (utm1 && utm2) {
+                    const dist = utmDistance(utm1, utm2);
+
+                    if (dist <= 3.5) {
+                        // keep the regular one
+                        if (!img.thermal) {
+                            selected[selected.length - 1] = img; // replace with regular
+                        }
+                        continue; // skip thermal
+                    }
+                }
+            }
+        }
+
+        selected.push(img);
+    }
+
+    // Collect flight path coords
+    return selected
+        .filter((img) => img.coord?.gps)
+        .map((img) => [img.coord!.gps.lat, img.coord!.gps.lon]);
+}
+
+/**
+ * Compute GPS coordinates for a detection based on its bounding box position
+ * within the image and the image's corner coordinates from the map
+ */
+export function computeDetectionGps(
+    detection: Detection,
+    images: ImageBasic[] | undefined,
+    maps: Map[] | undefined
+): GPSCoord | null {
+    if (!images || !maps) return null;
+
+    const image = images.find((img) => img.id === detection.image_id);
+    if (!image || !image.coord) return null;
+
+    const mapElement = maps
+        .flatMap((m) => m.map_elements)
+        .find((el) => el.image_id === image.id);
+    if (!mapElement) return null;
+
+    const cornersGps = mapElement.corners.gps;
+    const boundsPx = detection.bbox;
+    const imgWidth = image.width;
+    const imgHeight = image.height;
+
+    // Calculate relative position within image (center of bounding box)
+    const relX = (Number(boundsPx[0]) + Number(boundsPx[2]) / 2) / imgWidth;
+    const relY = (Number(boundsPx[1]) + Number(boundsPx[3]) / 2) / imgHeight;
+
+    // Interpolate GPS position within map element corners
+    // c0 = top-right, c1 = bottom-right, c2 = bottom-left, c3 = top-left
+    const c0 = cornersGps[1];
+    const c1 = cornersGps[2]; 
+    const c2 = cornersGps[3];
+    const c3 = cornersGps[0];
+
+    //interpolate first horizontally between c3-c0 and c2-c1, then vertically between those results
+    const top = [
+        c3[0] * (1 - relX) + c0[0] * relX,
+        c3[1] * (1 - relX) + c0[1] * relX,
+    ];
+    const bottom = [
+        c2[0] * (1 - relX) + c1[0] * relX,
+        c2[1] * (1 - relX) + c1[1] * relX,
+    ];
+    
+    const lat = top[0] * (1 - relY) + bottom[0] * relY;
+    const lon = top[1] * (1 - relY) + bottom[1] * relY;
+
+    
+    // const lat = c3[0] + relX * (c0[0] - c3[0]) + relY * (c2[0] - c3[0]);
+    // const lon = c3[1] + relX * (c0[1] - c3[1]) + relY * (c2[1] - c3[1]);
+
+    return { lat, lon };
+}
+
+/**
+ * Ray-casting point-in-polygon test for GPS coordinates
+ * Works correctly for small geographic polygons (no projection needed)
+ */
+export function isPointInPolygon(point: [number, number], polygon: [number, number][]): boolean {
+    const [px, py] = point;
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const [xi, yi] = polygon[i];
+        const [xj, yj] = polygon[j];
+        const intersect = ((yi > py) !== (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+export function polygonIntersection(subjectPolygon: [number, number][], clipPolygon: [number, number][]): [number, number][] {
+
+  function inside(p: [number, number], cp1: [number, number], cp2: [number, number]): boolean {
+    return (cp2[0] - cp1[0]) * (p[1] - cp1[1]) >
+           (cp2[1] - cp1[1]) * (p[0] - cp1[0]);
+  }
+
+  function intersection(cp1: [number, number], cp2: [number, number], s: [number, number], e: [number, number]): [number, number] {
+    const dc = [cp1[0] - cp2[0], cp1[1] - cp2[1]];
+    const dp = [s[0] - e[0], s[1] - e[1]];
+    const n1 = cp1[0] * cp2[1] - cp1[1] * cp2[0];
+    const n2 = s[0] * e[1] - s[1] * e[0];
+    const n3 = dc[0] * dp[1] - dc[1] * dp[0];
+
+    return [
+      (n1 * dp[0] - n2 * dc[0]) / n3,
+      (n1 * dp[1] - n2 * dc[1]) / n3
+    ];
+  }
+
+  let outputList = subjectPolygon;
+
+  for (let j = 0; j < clipPolygon.length; j++) {
+
+    const cp1 = clipPolygon[j];
+    const cp2 = clipPolygon[(j + 1) % clipPolygon.length];
+    const inputList = outputList;
+
+    outputList = [];
+    if (inputList.length === 0) break;
+
+    let s = inputList[inputList.length - 1];
+
+    for (const e of inputList) {
+
+      if (inside(e, cp1, cp2)) {
+
+        if (!inside(s, cp1, cp2)) {
+          outputList.push(intersection(cp1, cp2, s, e));
+        }
+
+        outputList.push(e);
+
+      } else if (inside(s, cp1, cp2)) {
+        outputList.push(intersection(cp1, cp2, s, e));
+      }
+
+      s = e;
+    }
+  }
+
+  return outputList;
+}

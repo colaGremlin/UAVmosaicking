@@ -1,0 +1,199 @@
+services:
+  db:
+    image: postgres:16
+    container_name: argusII_project_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - argus_db_data:/var/lib/postgresql/data
+
+  api:
+    build: ./api
+    working_dir: /api
+    container_name: argusII_backend
+    restart: unless-stopped
+    ports:
+      - "${PORT_API}:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      VITE_API_URL: ${VITE_API_URL}
+      WEBODM_ENABLED: ${ENABLE_WEBODM}
+      WEBODM_USERNAME: ${WEBODM_USERNAME}
+      WEBODM_PASSWORD: ${WEBODM_PASSWORD}
+      WEBODM_URL: ${WEBODM_URL}
+      OPEN_WEATHER_API_KEY: ${OPEN_WEATHER_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL}
+    links:
+      - db
+      - redis
+    volumes:
+      - ./api:/api
+      - argus_uploaded_files:/api/reports_data
+      - ./.env:/api/.env:rw
+
+  frontend:
+    build: ./frontend
+    container_name: argusII_frontend
+    restart: unless-stopped
+    # Reconcile node_modules with package.json on every start so a stale
+    # frontend_node_modules volume self-heals (e.g. after new deps are added).
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "${PORT_FRONTEND}:5173"
+    volumes:
+      - ./frontend:/frontend
+      - frontend_node_modules:/frontend/node_modules  # Separates Volume für node_modules
+    stdin_open: true
+    tty: true
+    environment:
+      VITE_API_URL: ${VITE_API_URL}
+      WEBODM_URL: ${WEBODM_URL}
+
+  argus_mapping_worker:
+    build: ./api
+    working_dir: /api
+    container_name: argusII_mapping_worker
+    entrypoint: celery
+    command: -A app.services.mapping.processing_manager worker -Q mapping --loglevel=${LOG_LEVEL}
+    volumes:
+      - ./api:/api
+      - argus_uploaded_files:/api/reports_data
+      - ./.env:/api/.env:rw
+    links:
+      - db
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      OPEN_WEATHER_API_KEY: ${OPEN_WEATHER_API_KEY}
+      WEBODM_ENABLED: ${ENABLE_WEBODM}
+      WEBODM_USERNAME: ${WEBODM_USERNAME}
+      WEBODM_PASSWORD: ${WEBODM_PASSWORD}
+      WEBODM_URL: ${WEBODM_URL}
+
+  argus_detection_worker:
+    build: ./detection
+    working_dir: /detection
+    container_name: argusII_detection_worker
+    entrypoint: celery
+    command: -A tasks_detection worker -Q detection --loglevel=${LOG_LEVEL}
+    volumes:
+      - argus_uploaded_files:/detection/reports_data
+    depends_on:
+      - redis
+      - api
+    environment:
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      BACKEND_URL: ${VITE_API_URL}
+      DEVICE: "cpu"
+
+  argus_yolo_worker:
+    build: ./detection_yolo
+    working_dir: /detection_yolo
+    container_name: argusII_yolo_worker
+    # entrypoint.sh pre-downloads model weights into hf_cache, then runs celery
+    entrypoint: ./entrypoint.sh
+    volumes:
+      - argus_uploaded_files:/detection_yolo/reports_data
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      - redis
+      - api
+    environment:
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      BACKEND_URL: ${VITE_API_URL}
+      DEVICE: "cpu"
+      LOG_LEVEL: ${LOG_LEVEL}
+      # DINOv3 re-identification (reid/). Weights are license-gated on HF:
+      # accept the model license once with a (free) HF account, then set HF_TOKEN
+      # in .env or on the ARGUS settings page.
+      HF_REID_MODEL_ID: ${HF_REID_MODEL_ID:-facebook/dinov3-vitb16-pretrain-lvd1689m}
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Published YOLO detection weights (public repo, no token needed).
+      ARGUS_YOLO_REPO_ID: ${ARGUS_YOLO_REPO_ID:-RoblabWhGe/ARGUS-YOLO}
+      ARGUS_YOLO_FILENAME: ${ARGUS_YOLO_FILENAME:-argus_yolo11x_1280.pt}
+      # GPU batch sizing: auto from free VRAM; YOLO_BATCH_SIZE forces a fixed size.
+      YOLO_BATCH_SIZE: ${YOLO_BATCH_SIZE:-}
+      GPU_MEM_TARGET_FRACTION: ${GPU_MEM_TARGET_FRACTION:-0.75}
+
+  argus_colmap_worker:
+    build: ./reconstruction_colmap
+    working_dir: /reconstruction_colmap
+    container_name: argusII_colmap_worker
+    entrypoint: celery
+    command: -A tasks_colmap worker -Q colmap --loglevel=${LOG_LEVEL}
+    volumes:
+      - argus_uploaded_files:/reconstruction_colmap/reports_data
+    depends_on:
+      - redis
+      - api
+    environment:
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      BACKEND_URL: ${VITE_API_URL}
+      DEVICE: "cpu"
+
+  argus_stella_worker:
+    build: ./reconstruction_stella
+    container_name: argusII_stella_worker
+    entrypoint: celery
+    command: -A tasks_reconstruction_stella worker -Q reconstruction_stella --loglevel=${LOG_LEVEL}
+    volumes:
+      - argus_uploaded_files:/data/reports
+    depends_on:
+      - redis
+      - api
+    environment:
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      BACKEND_URL: ${VITE_API_URL}
+      LOG_LEVEL: ${LOG_LEVEL}
+
+  ollama:
+    image: ollama/ollama
+    container_name: argusII_ollama
+    volumes:
+      - models:/root/.ollama:rw
+    restart: unless-stopped
+
+  argus_ollama_worker:
+    build: ./api
+    working_dir: /api
+    container_name: argusII_ollama_worker
+    entrypoint: celery
+    command: -A app.services.image_describer worker -Q description --loglevel=${LOG_LEVEL}
+    volumes:
+      - ./api:/api
+      - argus_uploaded_files:/api/reports_data
+      - ./.env:/api/.env:rw
+    links:
+      - db
+      - redis
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_PORT: ${PORT_REDIS}
+      REDIS_HOST: ${HOST_REDIS}
+      OPEN_WEATHER_API_KEY: ${OPEN_WEATHER_API_KEY}
+      WEBODM_ENABLED: ${ENABLE_WEBODM}
+      WEBODM_USERNAME: ${WEBODM_USERNAME}
+      WEBODM_PASSWORD: ${WEBODM_PASSWORD}
+      WEBODM_URL: ${WEBODM_URL}
+
+  redis:
+    image: redis:latest
+    container_name: argusII_redis
+
+volumes:
+  argus_db_data:
+  argus_uploaded_files:
+  frontend_node_modules:
+  hf_cache:
+  models:

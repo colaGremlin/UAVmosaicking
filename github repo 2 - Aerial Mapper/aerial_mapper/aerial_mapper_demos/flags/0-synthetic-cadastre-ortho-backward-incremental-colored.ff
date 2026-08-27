@@ -1,0 +1,24 @@
+# general
+--alsologtostderr=false
+--v=0
+
+# dataset
+--backward_grid_data_directory=/tmp/simulation/
+--backward_grid_filename_poses=opt_poses.txt
+--backward_grid_prefix_images=image_
+--backward_grid_filename_camera_rig=camera_fixed_wing.yaml
+
+# backward grid orthomosaic
+--backward_grid_show_orthomosaic_opencv=false
+--backward_grid_save_orthomosaic_jpg=true
+--backward_grid_orthomosaic_jpg_filename=/tmp/orthomosaic_incremental.jpg
+--backward_grid_orthomosaic_elevation_m=414.087
+--backward_grid_use_digital_elevation_map=false
+--backward_grid_grid_mode_batch=false
+--backward_grid_colored_ortho=true
+--backward_grid_center_easting=0.0
+--backward_grid_center_northing=0.0
+--backward_grid_delta_easting=200.0
+--backward_grid_delta_northing=200.0
+--backward_grid_resolution=0.5
+--backward_grid_use_multi_threads=true

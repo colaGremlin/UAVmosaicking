@@ -1,0 +1,299 @@
+// src/api/groups.ts
+import type { Group } from "@/types/group";
+import type { Report, ReportSummary } from "@/types/report";
+import type { Map } from "@/types/map";
+import type { ProcessingSettings } from "@/types/processing";
+import type { Image, ImageBasic } from "@/types/image";
+import type { Detection, FireMap, Geometry, Properties } from "./types/detection";
+import type { ThermalMap } from "./types/thermalData";
+import type {
+  SettingsData,
+  WebODMSettings,
+  OpenWeatherSettings,
+  HuggingFaceSettings,
+  DRZSettings,
+  SettingsTestResult,
+} from "@/types/settings";
+import type { CameraConfigSummary, CameraConfig } from "@/types/cameraConfig";
+import type { ReconstructionSettings, ReconstructionResults } from "@/types/reconstruction";
+
+import { data } from "react-router-dom";
+
+// const API_URL = "http://" + process.env.VITE_API_URL + ":" + process.env.VITE_API_PORT;
+// const API_URL = "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL ;
+
+async function fetchJson<T>(endpoint: string): Promise<T> {
+  const res = await fetch(`${API_URL}${endpoint}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch ${endpoint}: ${res.status}`);
+  }
+  return res.json();
+}
+
+async function postJson<T>(
+  endpoint: string,
+  data: unknown,
+  method: "POST" | "PUT" | "PATCH" = "POST"
+): Promise<T> {
+  const res = await fetch(`${API_URL}${endpoint}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to ${method} ${endpoint}: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+async function deleteRequest(
+  endpoint: string
+): Promise<void> {
+  const res = await fetch(`${API_URL}${endpoint}`, {
+    method: "DELETE",
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to DELETE ${endpoint}: ${res.status}`;
+    try {
+      const json = await res.json();
+      msg += ` - ${json.detail || JSON.stringify(json)}`;
+    } catch {
+      // Ignore JSON parse error
+    }
+    throw new Error(msg);
+  }
+}
+
+export const getGroups = () => fetchJson<Group[]>("/groups/");
+export const getGroup = (id: number) => fetchJson<Group>(`/groups/${id}`);
+export const getGroupReports = (id: number) => fetchJson<Report[]>(`/groups/${id}/reports`);
+export const createGroup = (data: { name: string; description: string }) => postJson<Group>("/groups/", data);
+export const getSummaryReports = (group_id: number) => fetchJson<ReportSummary[]>(`/groups/${group_id}/summary`);
+export const deleteGroup = (id: number) => deleteRequest(`/groups/${id}`);
+export const editGroup = (data: { id: number; name: string; description: string }) => postJson<Group>(`/groups/${data.id}`, data, "PUT");
+
+export const getReport = (report_id: number) => fetchJson<Report>(`/reports/${report_id}`);
+export const createReport = (data: { group_id: number; title: string; description: string }) =>  postJson<Report>(`/reports/`, data);
+export const deleteReport = (report_id: number) => deleteRequest(`/reports/${report_id}`);
+export const editReport = (data: { id: number; title: string; description: string }) => {return postJson<Report>(`/reports/${data.id}`, data, "PUT");};
+
+export const getMaps = (report_id: number) => fetchJson<Map[]>(`/reports/${report_id}/mapping_report/maps`);
+export const getMapsSlim = (report_id: number) => fetchJson<Map[]>(`/reports/${report_id}/mapping_report/maps_slim`);
+export const getMapById = (report_id: number, map_id: number) => fetchJson<Map>(`/reports/${report_id}/mapping_report/maps/${map_id}`);
+
+export type MapDownloadFormat = "png" | "geotiff_wgs84" | "geotiff_utm";
+export const getMapDownloadUrl = (report_id: number, map_id: number, format: MapDownloadFormat, filename?: string): string => {
+  const params = new URLSearchParams({ format });
+  if (filename) params.set("filename", filename);
+  return `${API_URL}/reports/${report_id}/mapping_report/maps/${map_id}/download?${params.toString()}`;
+};
+
+// SSE stream of live report events (see api/SSE_MIGRATION_PLAN.md)
+export const getReportEventsUrl = (report_id: number): string => `${API_URL}/reports/${report_id}/events`;
+export const getODMProjectID = (report_id: number) => fetchJson<{ webodm_project_id: string }>(`/reports/${report_id}/mapping_report/webodm_project_id`);
+
+export const getImages = (report_id: number) => fetchJson<ImageBasic[]>(`/images/report/${report_id}`);
+export const getImage = (image_id: number) => fetchJson<{ image: string }>(`/images/${image_id}`);
+export const deleteImage = (image_id: number) => deleteRequest(`/images/${image_id}`);
+export const getThermalMatrix = (image_id: number) => fetchJson<{ image_id: number; matrix: number[][]; min_temp: number; max_temp: number }>(`/images/${image_id}/thermal_matrix`);
+
+export const startDetection = (report_id: number, processing_mode: string) => postJson<{ task_id: number}>(`/detections/r/${report_id}`, { processing_mode });
+export const getDetectionStatus = (report_id: number) => fetchJson<{ report_id: number, status: string; progress: number; message?: string; error?: string }>(`/detections/r/${report_id}/status`);
+export const getDetections = (report_id: number) => fetchJson<Detection[]>(`/detections/r/${report_id}`);
+export const getNewDetections = (report_id: number, knownIds: number[]) => postJson<Detection[]>(`/detections/r/${report_id}/incremental`, { known_ids: knownIds });
+export const updateDetection = (detection_id: number, data: Detection) => postJson<any>(`/detections/${detection_id}`, data, "PUT");
+export const deleteDetection = (detection_id: number) => deleteRequest(`/detections/${detection_id}`);
+export const updateDetectionBatch = (report_id: number, data: Detection[]) => postJson<any>(`/detections/r/${report_id}/batch_update`, data, "PUT");
+export const updateDetectionUniqueObject = (
+  report_id: number,
+  unique_object_id: number | null,
+  detection_ids: number[],
+) => postJson<{ updated_count: number }>(
+  `/detections/r/${report_id}/unique_object`,
+  { unique_object_id, detection_ids },
+  "PUT",
+);
+export const getFireMap = (report_id: number, min_confidence?: number) => {
+  const query = min_confidence !== undefined ? `?min_confidence=${min_confidence}` : "";
+  return fetchJson<FireMap>(`/detections/r/${report_id}/fire_map${query}`);
+};
+export const getThermalMap = (report_id: number, t_min?: number, t_max?: number) => {
+  const params = new URLSearchParams();
+  if (t_min !== undefined) params.set("t_min", String(t_min));
+  if (t_max !== undefined) params.set("t_max", String(t_max));
+  const query = params.toString();
+  return fetchJson<ThermalMap>(`/reports/${report_id}/thermal_map${query ? `?${query}` : ""}`);
+};
+export const sendDetectionToDrz = (geometry: Geometry, properties: Properties) =>
+  postJson<{ message: string; error?: string; iais_response?: unknown }>(
+    "/detections/send_to_iais",
+    { geometry, properties }
+  );
+
+export const sendMapToDrz = (reportId: number, data: { map_id: number; layer_name: string } ) => postJson<{success: boolean; message:string}>(`/reports/${reportId}/send_map`, data);
+
+export const startAutoDescription = (report_id: number) => postJson<{ status: string }>(`/reports/${report_id}/auto_description`, {});
+export const getAutoDescription = (report_id: number) => fetchJson<{ report_id: number, status: string, progress: number, description: string }>(`/reports/${report_id}/auto_description`);
+
+export const getSettings = () => fetchJson<SettingsData>("/settings/");
+export const updateWebodmSettings = (settings: WebODMSettings) =>
+  postJson<{ message: string }>("/settings/webodm", settings, "PUT");
+export const updateWeatherSettings = (settings: OpenWeatherSettings) =>
+  postJson<{ message: string }>("/settings/openweather", settings, "PUT");
+export const updateDrzSettings = (settings: DRZSettings) =>
+  postJson<{ message: string }>("/settings/drz", settings, "PUT");
+export const updateHuggingFaceSettings = (settings: HuggingFaceSettings) =>
+  postJson<{ message: string }>("/settings/huggingface", settings, "PUT");
+export const updateDetectionColors = (settings: { DETECTION_COLORS: { [key: string]: string } }) =>
+  postJson<{ message: string }>("/settings/appearance", settings, "PUT");
+
+export const testWebodmSettings = (settings: WebODMSettings) =>
+  postJson<SettingsTestResult>("/settings/webodm/test", settings);
+export const testWeatherSettings = (settings: OpenWeatherSettings) =>
+  postJson<SettingsTestResult>("/settings/openweather/test", settings);
+export const testDrzSettings = (settings: DRZSettings) =>
+  postJson<SettingsTestResult>("/settings/drz/test", settings);
+export const testHuggingFaceSettings = (settings: HuggingFaceSettings) =>
+  postJson<SettingsTestResult>("/settings/huggingface/test", settings);
+
+// WebODM integration
+export const getWebODMAvailable = () => fetchJson<{ is_available: boolean, url: string }>("/odm/");
+export const getWebODMTasks = (project_id: string) => fetchJson<any[]>(`/odm/projects/${project_id}/tasks`);
+// POST: Start report processing
+export const startReportProcessing = (
+  reportId: number,
+  settings: ProcessingSettings
+): Promise<Report> =>
+  postJson(`/reports/${reportId}/process`, settings);
+
+// POST: Stop report processing
+export const stopReportProcessing = (reportId: number): Promise<Report> =>
+  postJson(`/reports/${reportId}/process/stop`, {});
+
+// GET: Poll processing status
+export const getReportProcessStatus = (
+  reportId: number
+): Promise<Report> =>
+  fetchJson(`/reports/${reportId}/process/`);
+
+// GET: Last-used processing settings for a report
+export const getProcessingSettings = (
+  reportId: number
+): Promise<Partial<ProcessingSettings>> =>
+  fetchJson(`/reports/${reportId}/processing_settings`);
+
+
+// --- Reconstruction endpoints ---
+
+// URL builder for the XHR-based unified upload hook
+export const getUnifiedUploadUrl = (report_id: number): string =>
+  `${API_URL}/reports/${report_id}/upload`;
+
+export const startReconstructionProcessing = (
+  report_id: number,
+  settings: ReconstructionSettings
+): Promise<Report> =>
+  postJson<Report>(`/reconstruction/${report_id}/process`, settings);
+
+export const getReconstructionStatus = (
+  report_id: number
+): Promise<{ report_id: number; status: string; progress: number; message: string }> =>
+  fetchJson(`/reconstruction/${report_id}/status`);
+
+export const getReconstructionResults = (
+  report_id: number
+): Promise<ReconstructionResults> =>
+  fetchJson(`/reconstruction/${report_id}/results`);
+
+// --- COLMAP 3D reconstruction status ---
+
+export interface ColmapStatusData {
+  report_id: number;
+  status: "none" | "queued" | "running" | "completed" | "error";
+  progress: number;
+  message: string;
+  has_reconstruction: boolean;
+}
+
+// GET: COLMAP reconstruction status (separate fire-and-forget job dispatched after mapping)
+export const getColmapStatus = (reportId: number): Promise<ColmapStatusData> =>
+  fetchJson(`/reports/${reportId}/colmap/status`);
+
+export interface ColmapResultsData {
+  report_id: number;
+  has_reconstruction: boolean;
+  sparse_pointcloud_url: string | null;
+  dense_pointcloud_url: string | null;
+  has_dense_pointcloud: boolean;
+  reconstruction_mode: string | null;
+  registered_images: number | null;
+  total_images: number | null;
+}
+
+// GET: point-cloud URLs + stats of a finished COLMAP reconstruction
+export const getColmapResults = (reportId: number): Promise<ColmapResultsData> =>
+  fetchJson(`/reports/${reportId}/colmap/results`);
+
+//export api Url
+export const getApiUrl = () => API_URL;
+export const getExportReportUrl = (reportId: number): string => `${API_URL}/transfer/export/${reportId}`;
+
+export const moveReport = async (reportId: number, groupId: number): Promise<Report> => {
+  const res = await fetch(`${API_URL}/reports/${reportId}/move?group_id=${groupId}`, { method: "PATCH" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail || `Move failed: ${res.status}`);
+  }
+  return res.json();
+};
+
+export const importReport = async (groupId: number, file: File): Promise<Report> => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_URL}/transfer/import?group_id=${groupId}`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail || `Import failed: ${res.status}`);
+  }
+  return res.json();
+};
+
+// Camera Configs
+export const getCameraConfigList = () =>
+  fetchJson<CameraConfigSummary[]>("/settings/camera_configs");
+
+export const getCameraConfig = (model_name: string) =>
+  fetchJson<CameraConfig>(`/settings/camera_configs/${encodeURIComponent(model_name)}`);
+
+export const updateCameraConfig = (model_name: string, config: CameraConfig) =>
+  postJson<CameraConfig>(
+    `/settings/camera_configs/${encodeURIComponent(model_name)}`,
+    config,
+    "PUT"
+  );
+
+export const createCameraConfig = (data: {
+  model_name: string;
+  exif_dump?: Record<string, unknown> | null;
+  initial_data?: CameraConfig | null;
+}) => postJson<CameraConfig>("/settings/camera_configs", data);
+
+export const getExifDump = async (file: File): Promise<Record<string, unknown>> => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_URL}/settings/camera_configs/exif_dump`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`EXIF dump failed: ${res.status}`);
+  return res.json();
+};

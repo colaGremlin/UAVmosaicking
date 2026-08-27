@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+
+.env
+
+deprecated/
+api/app/reports_data/
+api/app/config.json
+api/tests
+
+.vscode/
+
+depthanyting/
+
+detection_yolo/*.pt
+
+*CLAUDE.md
+
+pytorch_model.bin
+model.safetensors
+*.safetensors
+.cache/huggingface/
+HF_TOKEN
+
+*.md

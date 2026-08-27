@@ -1,0 +1,83 @@
+services:
+  argus_detection_worker:
+    runtime: nvidia
+    environment:
+      DEVICE: "cuda:0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  argus_yolo_worker:
+    runtime: nvidia
+    environment:
+      DEVICE: "cuda"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  argus_colmap_worker:
+    runtime: nvidia
+    environment:
+      DEVICE: "cuda"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  argus_stella_worker:
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ollama:
+    runtime: nvidia
+    environment:
+      DEVICE: "cuda:0"
+      OLLAMA_GPU: "1"
+      OLLAMA_NUM_GPU: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # da3_streaming_worker:
+  #   build: ./da3_streaming
+  #   container_name: argusII_da3_streaming_worker
+  #   entrypoint: celery
+  #   command: -A tasks_da3_streaming worker -Q da3_streaming --loglevel=info
+  #   runtime: nvidia
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - capabilities: [gpu]
+  #   volumes:
+  #     - argus_uploaded_files:/data/input
+  #     - argus_outputs:/data/output
+  #     - hf_cache:/data/.huggingface
+  #   environment:
+  #     REDIS_HOST: ${HOST_REDIS}
+  #     REDIS_PORT: ${PORT_REDIS}
+  #     HF_HOME: /data/.huggingface
+  #     DEVICE: cuda
+  #   depends_on:
+  #     - redis

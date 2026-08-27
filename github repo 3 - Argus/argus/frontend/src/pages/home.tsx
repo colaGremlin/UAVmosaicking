@@ -1,0 +1,69 @@
+import { Routes, Route } from "react-router-dom";
+import { useEffect } from 'react'
+import reactLogo from '@/assets/react.svg'
+import argusLogoLight from '@/assets/Argus_icon_Light_crop.png'
+import argusLogoDark from '@/assets/Argus_icon_Dark_crop.png'
+import whLogoLight from '@/assets/Westfälische_Hochschule_Logo.svg'
+import whLogoDark from '@/assets/w-hs_pagelogo-inv.png'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { Separator } from "@/components/ui/separator"
+import { useBreadcrumbs } from "@/contexts/BreadcrumbContext";
+import { useTheme } from "@/components/ui/theme-provider";
+import { Button } from "@/components/ui/button";
+import { Link } from "react-router-dom";
+
+
+export default function Home() {
+  const { setBreadcrumbs } = useBreadcrumbs();
+  const { theme } = useTheme();
+
+  const current = theme === "system"
+    ? window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light"
+    : theme;
+
+  useEffect(() => {
+    setBreadcrumbs([]);
+  }, []);
+
+  return (
+    <>
+
+
+      {/* [{ label: "Home", href: "/" }]} /> */}
+      <Card className="flex flex-col justify-center max-w-md mx-auto mt-10 p-6 shadow-lg rounded-lg">
+        <CardHeader>
+          <CardTitle>ARGUS 2.0</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between p-4 h-20">
+            <a href="https://github.com/RoblabWh/argus" target="_blank">
+              <img src={current === "dark" ? argusLogoDark : argusLogoLight} className="max-w-20 p-2 m-2" alt="ARGUS logo" />
+            </a>
+            <Separator orientation="vertical" />
+            <a href="https://w-hs.de" target="_blank">
+              <img src={current === "dark" ? whLogoDark : whLogoLight} className="max-w-40 m-2" alt="Westfälische Hochschule logo" />
+            </a>
+          </div>
+        </CardContent>
+        <CardFooter>
+          <p>Development-Release</p>
+        </CardFooter>
+
+      </Card>
+      <div className="w-full flex justify-center items-center mt-10">
+        <Button variant="default" asChild>
+          <Link to="/overview">Go to Projects</Link>
+        </Button>
+      </div>
+    </>
+  )
+}

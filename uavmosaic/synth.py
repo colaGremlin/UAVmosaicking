@@ -143,11 +143,13 @@ class UavState:
 
 
 class FlightPlan:
-    """Four UAVs abreast on a lawnmower track, at differing altitudes and zooms.
+    """Four UAVs flying a lawnmower survey, one lane each -- mirroring UavRandomFlight.cs.
 
-    The spread is intentional: the UAVs are far enough apart that their footprints do not
-    overlap for most of the run, which is precisely the case feature-based stitching cannot
-    handle and direct georeferencing does not care about.
+    Kept deliberately in step with the Unity script so what the simulator produces is what the
+    real fleet will produce. Lane spacing is set against the *zoomed-in* footprint, so the four
+    footprints separate completely when the cameras zoom in -- the no-overlap case that
+    feature-based stitching cannot handle and direct georeferencing does not care about -- and
+    overlap heavily when they zoom out.
     """
 
     def __init__(
@@ -188,14 +190,18 @@ class FlightPlan:
         self.altitudes = tuple(base * (1.0 + 0.18 * i) for i in range(self.n))
 
     def state(self, uav_id: int, t: float) -> UavState:
-        # lawnmower triangle wave: north up the leg, then back south
-        period = 2.0 * self.leg / max(self.speed, 1e-9)
-        u = (t % period) / period
+        # lawnmower: straight legs along the lane, alternating direction, stepping sideways
+        # by a third of a lane each pass so the lane fills in evenly.
+        passes = 3
+        leg_time = 2.0 * self.leg / max(self.speed, 1e-9)
+        u = (t % leg_time) / leg_time
         along = self.leg * (2.0 * u if u < 0.5 else 2.0 * (1.0 - u)) - self.leg / 2.0
         heading_north = u < 0.5
 
-        lateral = (uav_id - (self.n - 1) / 2.0) * self.spacing
-        e = self.e0 + lateral + self.wander * math.sin(t * 0.3 + uav_id)
+        which_pass = int(t / leg_time) % passes
+        lane_centre = (uav_id - (self.n - 1) / 2.0) * self.spacing
+        lateral = lane_centre - self.spacing / 2.0 + (which_pass + 0.5) * (self.spacing / passes)
+        e = self.e0 + lateral
         n = self.n0 + along
         alt = self.altitudes[uav_id % len(self.altitudes)] * (
             1.0 + 0.08 * math.sin(t * 0.4 + uav_id * 1.7)

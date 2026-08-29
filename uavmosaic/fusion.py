@@ -217,7 +217,8 @@ class FusionEngine:
 
         t0 = time.perf_counter()
         for p in products:
-            self.canvas.composite(p.uav_id, p.roi, p.color, p.weight, now)
+            self.canvas.composite(p.uav_id, p.roi, p.color, p.weight, now,
+                                  feather=self.cfg.feather)
             self._last_footprints[p.uav_id] = p.footprint
         self.timer.record("composite", time.perf_counter() - t0)
 

@@ -115,6 +115,20 @@ class Canvas:
         counts = np.bincount(flat, minlength=256)
         return {i: int(c) for i, c in enumerate(counts) if c and i != UNOWNED}
 
+    def covered_bbox(self, stride: int = STAT_STRIDE):
+        """``(x0, y0, x1, y1)`` enclosing every imaged pixel, or None if nothing is imaged.
+
+        Subsampled like the other statistics: this drives a display viewport, so a few pixels
+        of slack costs nothing and a full-canvas scan every tick would not be free.
+        """
+        w = self.weight[::stride, ::stride]
+        rows = np.flatnonzero(w.any(axis=1))
+        cols = np.flatnonzero(w.any(axis=0))
+        if rows.size == 0 or cols.size == 0:
+            return None
+        return (int(cols[0] * stride), int(rows[0] * stride),
+                int((cols[-1] + 1) * stride), int((rows[-1] + 1) * stride))
+
     def clear(self) -> None:
         self.color[:] = 0
         self.weight[:] = 0.0
@@ -130,6 +144,7 @@ class Canvas:
         warped_color: np.ndarray,
         warped_weight: np.ndarray,
         t_now: float,
+        feather: float = 0.0,
     ) -> CompositeResult:
         """Blend one warped frame into the canvas under the max-weight rule.
 
@@ -138,6 +153,20 @@ class Canvas:
         produced no data, which doubles as the validity mask -- no separate alpha channel
         needed, because :data:`uavmosaic.weights.WEIGHT_FLOOR` guarantees real pixels are
         strictly positive.
+
+        ``feather`` softens the boundary between two aircraft. At 0 the winner takes the pixel
+        outright, which is fast but draws a visible line wherever two frames differ in exposure
+        or sharpness. Above 0 it cross-fades over a band of that width, expressed as a fraction
+        of the incoming frame's peak weight: 0.3 blends where the two weights are within 30% of
+        each other and stays a clean hard choice everywhere else. An aircraft still always
+        replaces its own pixels outright, so fresh imagery is never diluted by its own stale
+        imagery.
+
+        Note what this does and does not fix. It hides the *photometric* seam -- the visible
+        step where two exposures meet. It cannot fix *geometric* misregistration, where a river
+        appears to kink because the two frames projected it onto a flat plane from different
+        angles over real terrain relief. That is inherent to the flat-ground assumption and
+        only a surface model removes it; blending merely smears the join.
         """
         x0, y0, x1, y1 = roi
         rh, rw = y1 - y0, x1 - x0
@@ -152,6 +181,44 @@ class Canvas:
         cur_o = self.owner[y0:y1, x0:x1]
 
         valid = warped_weight > 0.0
+
+        if feather > 0.0:
+            peak = float(warped_weight.max())
+            if peak > 0.0:
+                # alpha = 0.5 + (w_new - w_old)/band, clipped. Written division-free and in
+                # place: the obvious w_new/(w_new+w_old) form measured 7.6 ms on a 1.9 Mpx
+                # ROI against 1.7 ms for this, and the two are equivalent after clipping.
+                inv_band = np.float32(1.0 / max(feather * peak, 1e-9))
+                alpha = np.subtract(warped_weight, cur_w)
+                alpha *= inv_band
+                alpha += np.float32(0.5)
+                np.clip(alpha, 0.0, 1.0, out=alpha)
+                alpha *= valid                       # nothing outside the warp
+                # Two cases must take the new pixel whole rather than cross-fade:
+                #   * canvas never written here -- blending against black would darken every
+                #     leading edge of the mosaic. The ground-truth test caught this as a drop
+                #     from 0.995 to 0.885 correlation against the source world.
+                #   * same aircraft -- fresh imagery is never diluted by its own stale imagery.
+                np.putmask(alpha, valid & (cur_w <= 0.0), np.float32(1.0))
+                np.putmask(alpha, valid & (cur_o == uav_id), np.float32(1.0))
+
+                inv_alpha = np.subtract(np.float32(1.0), alpha)
+                dst = self.color[y0:y1, x0:x1]
+                cv2.blendLinear(warped_color, dst, alpha, inv_alpha, dst=dst)
+
+                # Provenance follows the dominant contributor, not the blend.
+                update = alpha > 0.5
+                np.copyto(cur_w, warped_weight, where=update)
+                np.copyto(cur_o, np.uint8(uav_id), where=update)
+                np.copyto(self.stamp[y0:y1, x0:x1], np.float32(t_now), where=update)
+
+                n = int(np.count_nonzero(update))
+                self.stats.composites += 1
+                self.stats.pixels_written += n
+                return CompositeResult(
+                    uav_id=uav_id, pixels_written=n, pixels_in_roi=rh * rw, roi=roi
+                )
+
         update = valid & ((cur_o == uav_id) | (warped_weight > cur_w))
 
         # The colour buffer is copied with cv2.copyTo, not numpy. Measured on a 2069x1533

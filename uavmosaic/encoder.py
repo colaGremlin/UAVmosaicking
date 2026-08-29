@@ -69,7 +69,10 @@ class FfmpegSink:
             "-preset", c.preset,
             "-tune", c.tune,
             "-b:v", c.bitrate,
-            "-g", str(max(c.fps, 1)),        # one keyframe a second: fast receiver join
+            # Keyframe cadence. A viewer that connects mid-stream cannot decode anything
+            # until a keyframe arrives, and prints "non-existing PPS" until then. Twice a
+            # second keeps that window short at a negligible bitrate cost.
+            "-g", str(max(c.fps // max(c.fps_gop_divisor, 1), 1)),
             "-bf", "0",                        # no B-frames -- they add reorder latency
             "-pix_fmt", "yuv420p",             # what every player actually accepts
             "-f", c.container,

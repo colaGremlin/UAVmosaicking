@@ -8,7 +8,7 @@ from .coords import CanvasGeometry, GeodeticAnchor
 from .frames import SENSOR_EO, SENSOR_IR
 from .georef import DEFAULT_CLAMP_FACTOR, DEFAULT_MAX_INCIDENCE_DEG
 
-__all__ = ["AppConfig", "EncoderConfig", "DEFAULT_EO_PORTS", "DEFAULT_IR_PORTS"]
+__all__ = ["AppConfig", "EncoderConfig", "MjpegConfig", "DEFAULT_EO_PORTS", "DEFAULT_IR_PORTS"]
 
 DEFAULT_EO_PORTS = {0: 5001, 1: 5002, 2: 5003, 3: 5004}
 DEFAULT_IR_PORTS = {0: 5011, 1: 5012, 2: 5013, 3: 5014}
@@ -28,7 +28,25 @@ class EncoderConfig:
     preset: str = "ultrafast"
     tune: str = "zerolatency"
     ffmpeg: str = "ffmpeg"
-    container: str = "mpegts"  #: 'mpegts' plays with ffplay/MP out of the box; 'rtp' needs an SDP
+    container: str = "mpegts"  #: 'mpegts' plays with ffplay/VLC out of the box; 'rtp' needs an SDP
+    #: Keyframe every fps/divisor frames. 2 -> twice a second, which halves how long a
+    #: newly-connected viewer shows decoder warnings before it can sync.
+    fps_gop_divisor: int = 2
+
+
+@dataclass(frozen=True)
+class MjpegConfig:
+    """MJPEG over HTTP -- Mission Planner consumes this with nothing installed.
+
+    Heavier on bandwidth than H.264, which is irrelevant on loopback and matters on a radio.
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"   #: bind address; 0.0.0.0 lets another machine on the LAN watch
+    port: int = 8080
+    quality: int = 80
+    width: int = 1280
+    height: int = 720
 
 
 @dataclass(frozen=True)
@@ -59,6 +77,9 @@ class AppConfig:
     allow_lower_half: bool = True
     default_plane_z: float = 0.0
 
+    #: Cross-fade width between two aircraft, as a fraction of peak frame weight. 0 = hard
+    #: seam (fastest). ~0.3 hides the exposure step where two frames meet.
+    feather: float = 0.3
     radial_power: float = 2.0
     incidence_power: float = 2.0
     gsd_power: float = 1.0
@@ -67,7 +88,18 @@ class AppConfig:
     warp_interpolation: str = "linear"  #: 'linear' or 'nearest'
 
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
-    hud: bool = True
+    mjpeg: MjpegConfig = field(default_factory=MjpegConfig)
+
+    #: Serve the mosaic as georeferenced map tiles + WMS. Needs ``anchor``.
+    tiles_enabled: bool = False
+    tiles_host: str = "0.0.0.0"
+    tiles_port: int = 8081
+
+    #: Zoom the video output to the imaged region rather than the whole AOI. Display only --
+    #: the map layer stays georeferenced either way.
+    fit_view: bool = False
+    #: 'off' | 'minimal' | 'full'. Operators get 'minimal'; 'full' adds the engineering layer.
+    hud: str = "minimal"
 
     def ports_for(self, sensor_id: int) -> dict[int, int]:
         return self.eo_ports if sensor_id == SENSOR_EO else self.ir_ports
@@ -86,6 +118,12 @@ class AppConfig:
         if self.encoder.enabled:
             e = self.encoder
             lines.append(f"out: H.264 {e.width}x{e.height}@{e.fps} -> {e.host}:{e.port} ({e.container})")
+        if self.mjpeg.enabled:
+            m = self.mjpeg
+            lines.append(f"out: MJPEG {m.width}x{m.height} q{m.quality} -> http://{m.host}:{m.port}/stream.mjpg")
+        if self.tiles_enabled:
+            lines.append(f"out: map layer -> http://{self.tiles_host}:{self.tiles_port}/tiles/{{z}}/{{x}}/{{y}}.png")
+        lines.append(f"hud: {self.hud}")
         if self.anchor:
             lines.append(
                 f"anchor: {self.anchor.lat_deg:.6f}, {self.anchor.lon_deg:.6f} @ {self.anchor.alt_m:.1f} m"

@@ -18,6 +18,7 @@ import argparse
 import logging
 import socket
 import sys
+import random
 import time
 from pathlib import Path
 
@@ -65,12 +66,16 @@ class SimSender:
         mtu: int = DEFAULT_MTU,
         world: np.ndarray | None = None,
         seed: int = 7,
+        loss: float = 0.0,
     ) -> None:
         self.cfg = cfg
         self.host = host
         self.ports = ports or dict(DEFAULT_EO_PORTS)
         self.hz = hz
         self.jpeg_quality = jpeg_quality
+        self.loss = float(loss)
+        self._rng = random.Random(20260828)
+        self.packets_dropped = 0
         self.mtu = mtu
         self.world = make_world(cfg.aoi, seed) if world is None else world
         self.plan = FlightPlan(cfg.aoi, n_uavs=len(cfg.uav_ids))
@@ -111,6 +116,11 @@ class SimSender:
             )
             addr = (self.host, self.ports[uav_id])
             for p in packets:
+                # Loopback never loses a datagram, so without this the receiver's loss
+                # handling is never actually exercised before it meets a real radio.
+                if self.loss > 0.0 and self._rng.random() < self.loss:
+                    self.packets_dropped += 1
+                    continue
                 self.sock.sendto(p, addr)
                 self.bytes_sent += len(p)
             self.packets_sent += len(packets)
@@ -158,6 +168,9 @@ def main(argv=None) -> int:
     ap.add_argument("--mtu", type=int, default=DEFAULT_MTU)
     ap.add_argument("--gsd", type=float, default=0.5, help="world resolution, m/px")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--loss", type=float, default=0.0, metavar="FRACTION",
+                    help="drop this fraction of datagrams, e.g. 0.03 for 3 %%. "
+                         "Simulates a radio link; loopback itself never loses any")
     ap.add_argument("--save-world", type=str, default=None, help="write the ground truth PNG")
     a = ap.parse_args(argv)
 
@@ -168,7 +181,8 @@ def main(argv=None) -> int:
         aoi=CanvasGeometry(e_min=-1000, n_min=-1000, e_max=1000, n_max=1000, gsd=a.gsd)
     )
     sender = SimSender(
-        cfg, host=a.host, hz=a.hz, jpeg_quality=a.quality, mtu=a.mtu, seed=a.seed
+        cfg, host=a.host, hz=a.hz, jpeg_quality=a.quality, mtu=a.mtu, seed=a.seed,
+        loss=a.loss
     )
     if a.save_world:
         cv2.imwrite(a.save_world, sender.world)
